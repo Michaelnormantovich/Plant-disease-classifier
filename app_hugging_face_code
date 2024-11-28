@@ -1,0 +1,132 @@
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from PIL import Image
+import gradio as gr
+
+# Set up the device (CPU or GPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- Class Names ---
+class_info = {
+    "Pepper__bell___Bacterial_spot": ("Bacterial Spot", "https://en.wikipedia.org/wiki/Bacterial_spot"),
+    "Pepper__bell___healthy": ("Healthy", ""),
+    "Potato___Early_blight": ("Early Blight", "https://en.wikipedia.org/wiki/Alternaria_solani"),
+    "Potato___healthy": ("Healthy", ""),
+    "Potato___Late_blight": ("Late Blight", "https://en.wikipedia.org/wiki/Phytophthora_infestans"),
+    "Tomato_Bacterial_spot": ("Bacterial Spot", "https://en.wikipedia.org/wiki/Bacterial_spot"),
+    "Tomato_Early_blight": ("Early Blight", "https://en.wikipedia.org/wiki/Alternaria_solani"),
+    "Tomato_healthy": ("Healthy", ""),
+    "Tomato_Late_blight": ("Late Blight", "https://en.wikipedia.org/wiki/Phytophthora_infestans"),
+    "Tomato_Leaf_Mold": ("Leaf Mold", "https://en.wikipedia.org/wiki/Leaf_mold"),
+    "Tomato_Septoria_leaf_spot": ("Septoria Leaf Spot", "https://en.wikipedia.org/wiki/Septoria_lycopersici"),
+    "Tomato_Spider_mites_Two_spotted_spider_mite": ("Two-spotted Spider Mite", "https://en.wikipedia.org/wiki/Tetranychus_urticae"),
+    "Tomato__Target_Spot": ("Target Spot", "https://en.wikipedia.org/wiki/Corynespora_cassiicola"),
+    "Tomato__Tomato_mosaic_virus": ("Tomato Mosaic Virus", "https://en.wikipedia.org/wiki/Tobamovirus"),
+    "Tomato__Tomato_YellowLeaf__Curl_Virus": ("Tomato Yellow Leaf Curl Virus", "https://en.wikipedia.org/wiki/Tomato_yellow_leaf_curl_virus")
+}
+
+# --- Load Models ---
+def load_leaf_classifier():
+    model = models.resnet18(pretrained=True)
+    num_classes = 38  # Adjust based on your training setup
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    try:
+        model.load_state_dict(torch.load("leaf_classifier.pth", map_location=device))
+    except Exception as e:
+        print(f"Error loading leaf classifier: {e}")
+    model.to(device)
+    model.eval()
+    return model
+
+def load_plant_disease_model():
+    model = models.resnet34(pretrained=True)
+    model.fc = nn.Linear(model.fc.in_features, len(class_info))  # Plant disease classes
+    try:
+        model.load_state_dict(torch.load("plant_disease_model_final (2).pth", map_location=device))
+    except Exception as e:
+        print(f"Error loading plant disease model: {e}")
+    model.to(device)
+    model.eval()
+    return model
+
+# Instantiate both models
+leaf_classifier = load_leaf_classifier()
+plant_disease_model = load_plant_disease_model()
+
+# --- Image Transformation ---
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+# --- Prediction Logic ---
+def predict(image):
+    try:
+        # Preprocess the image
+        image_tensor = transform(image).unsqueeze(0).to(device)
+
+        # Step 1: Classify if it's a leaf
+        with torch.no_grad():
+            leaf_output = leaf_classifier(image_tensor)
+            _, predicted_idx = torch.max(leaf_output, 1)
+            is_leaf = predicted_idx.item() < 28  # Adjust based on leaf class indices
+
+        if not is_leaf:
+            return "It does not look like a leaf, try again.", "", ""
+
+        # Step 2: Classify plant disease if it's a leaf
+        with torch.no_grad():
+            disease_output = plant_disease_model(image_tensor)
+            probabilities = torch.softmax(disease_output, dim=1)[0]
+            confidence, predicted_idx = torch.max(probabilities, dim=0)
+            confidence_percentage = confidence.item() * 100
+
+        if confidence_percentage >= 80:  # Adjust threshold as needed
+            class_name = list(class_info.keys())[predicted_idx.item()]
+            disease_name, wiki_link = class_info[class_name]
+            return disease_name, f"{confidence_percentage:.2f}%", wiki_link
+        else:
+            return "I am not sure", f"{confidence_percentage:.2f}%", ""
+
+    except Exception as e:
+        print(f"Prediction error: {e}")
+        return "Error in processing the image.", "", ""
+
+# --- Gradio App ---
+title = "<div style='text-align: center; font-size: 44px; color: darkblue;'>Plant Disease Classifier 🌿</div>"
+description = """
+<div style="text-align: center; font-size: 40px; color: darkblue;">
+    Upload an image of a plant leaf, and this tool will identify if the leaf shows signs of disease.<br>
+    We support tomatoes, potatoes, and bell peppers.
+</div>
+"""
+examples = [
+    ["https://i.postimg.cc/Pry18qZJ/healty-example.jpg"],
+    ["https://i.postimg.cc/q7PKd6fb/Alternaria-Leaf-resized.jpg"],
+    ["https://i.postimg.cc/Nj9QxR0b/ex6.jpg"]
+]
+
+custom_css = """
+body { background-image: url('https://i.postimg.cc/yxWhPBRp/back.jpg'); background-size: cover; background-position: center; }
+.gradio-container { background: rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 20px; max-width: 400px; margin: auto; }
+.gradio-output textarea { font-size: 14px; max-height: 50px; } /* Make the output boxes smaller */
+.gradio-output { text-align: center; } /* Center the output content */
+"""
+
+interface = gr.Interface(
+    fn=predict,
+    inputs=gr.Image(type="pil"),
+    outputs=[
+        gr.Textbox(label="Prediction", elem_id="prediction", lines=1, max_lines=1),
+        gr.Textbox(label="Confidence Score", elem_id="confidence_score", lines=1, max_lines=1),
+        gr.Textbox(label="Here is some useful info", elem_id="wiki_link", lines=1, max_lines=1)
+    ],
+    title=title,
+    description=description,
+    examples=examples,
+    css=custom_css
+)
+
+interface.launch()
